@@ -672,7 +672,7 @@ void main()
         temp += (AMBIENT_TEMP - temp) * cool;
 
         if (heatPainted>0) temp = heatPainted;
-        // wood and plants should burn on same temp right?
+        // wood and plants should burn on same temp right
         if ((isCol(ocolor,PLANT)||isCol(ocolor, WOOD)) && temp > WOOD_IGNITION_TEMP) {
             ocolor = RED;
         }
