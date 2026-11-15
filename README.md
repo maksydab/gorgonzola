@@ -17,7 +17,7 @@ This project is fairly interesting as it contains many types of materials that i
 Additional features:
 - Switching the display buffers - just press keyboard key `s`. It cycles.
 - Temperature simulation - comes with heat transfer
-- Ereaser - the first button, it allows to get rid of any material
+- Eraser - the first button, it allows to get rid of any material
 
 ## Why is it interesting
 In normal CPU based cellular automaton, each cell is simulated one by one deciding where it wants to end up, but on a GPU, each cell decides about itself at the same time, essentially meaning if you have a sand and it has an empty cell below it it doesn't clear itself then set the cell below it to sand. The sand cell sets itself to empty, and then when the time comes for the cell below it, the cell below it sees that it's empty adn above is a sand cell so it sets itself to sand cell, this means the simulation needs to be deterministic. The entire undertaking was fairly challanging considering the difficulty of compute shaders in themselves, and making sure all states are deterministic and defined.
