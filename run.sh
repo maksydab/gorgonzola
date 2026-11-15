@@ -1,3 +1,7 @@
 set -e
-gcc main.c glad.c -I. -o opengl_app -lglfw -lGL -ldl -lm
-./opengl_app
+gcc main.c glad/src/glad.c \
+    -Iglad/include \
+    -o app \
+    -lglfw -lGL -ldl -lm
+
+./app

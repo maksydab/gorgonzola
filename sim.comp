@@ -1,0 +1,657 @@
+#version 430 core
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(rgba16f, binding = 0) uniform image2D inputState;
+layout(rgba16f, binding = 1) uniform image2D outputState;
+
+layout(r16f, binding = 2) readonly uniform image2D inputTemperature;
+layout(r16f, binding = 3) writeonly uniform image2D outputTemperature;
+
+uniform ivec2 u_size;
+uniform ivec2 u_mouse;
+uniform int u_painting;
+uniform float u_frame;
+
+const vec4 EMPTY = vec4(0, 0, 0, 1);
+
+const ivec2 up = ivec2(0,1);
+const ivec2 down = ivec2(0,-1);
+const ivec2 right = ivec2(1,0);
+const ivec2 left = ivec2(-1,0);
+
+const int bottom = 60;
+
+const ivec2 COLOR_STATE_POS = ivec2(0, 0);
+const float T = 0.4;
+const int SPREAD = 8;
+const int FREE_SLIDE = 2;
+
+const vec4 RED = vec4(252.0/255.0, 82.0/255.0, 3.0/255.0, 1.0);
+const vec4 YELLOW = vec4(0.98, 0.78, 0.01, 1);
+const vec4 WOOD = vec4(61.0/255.0, 32.0/255.0, 9.0/255.0, 1.0);
+const vec4 WATER = vec4(23.0/255.0, 185.0/255.0, 255.0/255.0, 1.0);
+const vec4 STEAM = vec4(110.0/255.0, 185.0/255.0, 185.0/255.0, 1.0);
+const vec4 STEEL = vec4(180.0/255.0, 185.0/255.0, 185.0/255.0, 1.0);
+const vec4 GLASS = vec4(170.0/255.0, 170.0/255.0, 220.0/255.0, 1.0);
+const vec4 MGLASS = vec4(230.0/255.0, 170.0/255.0, 220.0/255.0, 1.0);
+const vec4 ACID = vec4(100.0/255.0, 255.0/255.0, 30.0/255.0, 1.0);
+const vec4 ICE = vec4(220.0/255.0, 220.0/255.0, 255.0/255.0, 1.0);
+// we all love some warm
+const float AMBIENT_TEMP = 20.0;
+const float FIRE_TEMP = 1800.0;
+const float WOOD_IGNITION_TEMP = 180.0;
+const float HEAT_TRANSFER = 0.12;
+const float COOLING_RATE = 0.0;
+const float GLASS_COOLING_RATE = 0.003;
+const float STEAM_TEMP = 100.0;
+const float ICE_TEMP = 0.0;
+const float SAND_MELT_TEMP = 600.0;
+const float GLASS_SOLIDIFY_TEMP = 400.0;
+const float ACID_CONSUME_CHANCE = 0.02;
+const int HEAT_RANGE = 3;
+const float HEAT_KERNEL_SUM = 9.5444;
+const float HEAT_GAIN = 0.8;
+
+// the constants are gettign out of hand
+
+bool isEmpty(ivec2 p){
+    if (p.y < 0 || p.y >= u_size.y)
+        return false;
+    if (p.x < 0 || p.x >= u_size.x)
+        return false;
+    return all(equal(imageLoad(inputState, p), EMPTY));
+}
+
+bool inBounds(ivec2 p){
+    return p.x >= 0 && p.x < u_size.x &&
+           p.y >= 0 && p.y < u_size.y;
+}
+
+float rand(ivec2 co) {
+    vec2 seed = vec2(co) + vec2(mod(u_frame,1000) * 19, mod(u_frame,1000) * 31);
+    return fract(sin(dot(seed, vec2(12.9898, 78.233))) * 43758.5453);
+}
+
+bool isCol(vec4 c, vec4 b)
+{
+    return distance(c, b) < 0.01;
+}
+
+bool isLiquid(vec4 c)
+{
+    return isCol(c, WATER) || isCol(c, ACID) || isCol(c, MGLASS);
+}
+
+float acidChance(vec4 m)
+{
+    if (isCol(m, YELLOW)) return 0.25;
+    if (isCol(m, WOOD))   return 0.20;
+    if (isCol(m, STEEL))  return 0.05;
+    return 0.0;
+}
+
+float conductivity(vec4 m){
+    if (isCol(m, STEEL))  return 1.00;
+    if (isCol(m, RED))    return 0.90;
+    if (isCol(m, WATER))  return 0.25;
+    if (isCol(m, ACID))   return 0.20;
+    if (isCol(m, MGLASS)) return 0.12;
+    if (isCol(m, GLASS))  return 0.07;
+    if (isCol(m, YELLOW)) return 0.18;
+    if (isCol(m, STEAM))  return 0.05;
+    if (isCol(m, WOOD))   return 0.04;
+    return 0.02;
+}
+
+bool canSink(ivec2 p){
+    if (p.y < bottom) return false;
+    return isEmpty(p) || (inBounds(p) && isCol(imageLoad(inputState, p), WATER));
+}
+float getTemp(ivec2 p)
+{
+    if (!inBounds(p))
+        return AMBIENT_TEMP;
+
+    return imageLoad(inputTemperature, p).r;
+}
+ivec2 sandTarget(ivec2 s)
+{
+    if (s.y <= bottom) return s;
+    if (canSink(s + down)) return s + down;
+
+    int dir = (rand(s) < 0.5) ? 1 : -1;
+    ivec2 a = s + down + ivec2(dir, 0);
+    if (canSink(a)) return a;
+    ivec2 b = s + down + ivec2(-dir, 0);
+    if (canSink(b)) return b;
+    return s;
+}
+ivec2 sandSource(ivec2 t)
+{
+    if (t.y < bottom) return t;
+    ivec2 cand[3] = ivec2[3](up, up + left, up + right);
+    for (int i = 0; i < 3; i++) {
+        ivec2 s = t + cand[i];
+        if (inBounds(s) &&
+            isCol(imageLoad(inputState, s), YELLOW) &&
+            sandTarget(s) == t)
+            return s;
+    }
+    return t;
+}
+
+// let us free this water
+bool waterFree(ivec2 c)
+{
+    return isEmpty(c) && sandSource(c) == c;
+}
+ivec2 slideTarget(ivec2 s, int dir)
+{
+    ivec2 t = s;
+    bool supported = true;
+    for (int i = 1; i <= SPREAD; i++) {
+        ivec2 c = s + ivec2(dir * i, 0);
+        if (!waterFree(c)) break;
+        if (isEmpty(c + down)) supported = false;
+        if (i > FREE_SLIDE && !supported) break;
+        t = c;
+    }
+    return t;
+}
+
+ivec2 liquidTarget(ivec2 s)
+{
+    if (s.y <= bottom) return s;
+    if (sandSource(s) != s) return s;
+
+    float r = rand(s);
+    int dir = (r < 0.5) ? -1 : 1;
+
+    if (waterFree(s + down)) return s + down;
+
+    if (waterFree(s + down + ivec2(dir, 0)))  return s + down + ivec2(dir, 0);
+    if (waterFree(s + down + ivec2(-dir, 0))) return s + down + ivec2(-dir, 0);
+
+    ivec2 t = slideTarget(s, dir);
+    if (t != s) return t;
+    return slideTarget(s, -dir);
+}
+
+ivec2 rawLiquidSource(ivec2 t, vec4 liq)
+{
+    if (inBounds(t + up) && isCol(imageLoad(inputState, t + up), liq) && liquidTarget(t + up) == t)
+        return t + up;
+    if (inBounds(t + up + right) && isCol(imageLoad(inputState, t + up + right), liq) && liquidTarget(t + up + right) == t)
+        return t + up + right;
+    if (inBounds(t + up + left) && isCol(imageLoad(inputState, t + up + left), liq) && liquidTarget(t + up + left) == t)
+        return t + up + left;
+    for (int i = 1; i <= SPREAD; i++) {
+        ivec2 sr = t + ivec2(i, 0);
+        if (inBounds(sr) && isCol(imageLoad(inputState, sr), liq) && liquidTarget(sr) == t)
+            return sr;
+        ivec2 sl = t + ivec2(-i, 0);
+        if (inBounds(sl) && isCol(imageLoad(inputState, sl), liq) && liquidTarget(sl) == t)
+            return sl;
+    }
+    return t;
+}
+
+ivec2 liquidSource(ivec2 t, vec4 liq)
+{
+    if (!isCol(liq, WATER) && rawLiquidSource(t, WATER) != t) return t;
+    if (isCol(liq, MGLASS) && rawLiquidSource(t, ACID) != t) return t;
+    return rawLiquidSource(t, liq);
+}
+
+float pairK(vec4 a, vec4 b){
+    float ca = conductivity(a);
+    float cb = conductivity(b);
+    return 2.0 * ca * cb / (ca + cb);
+}
+
+float conductHeat(ivec2 p, vec4 ocolor, float temp)
+{
+    bool selfEmpty = isCol(ocolor, EMPTY);
+    float dT = 0.0;
+    for (int dy = -HEAT_RANGE; dy <= HEAT_RANGE; dy++) {
+        for (int dx = -HEAT_RANGE; dx <= HEAT_RANGE; dx++) {
+            int d2 = dx * dx + dy * dy;
+            if (d2 == 0 || d2 > HEAT_RANGE * HEAT_RANGE) continue;
+            ivec2 q = p + ivec2(dx, dy);
+            vec4 m = inBounds(q) ? imageLoad(inputState, q) : EMPTY;
+            if (d2 > 1 && (selfEmpty || isCol(m, EMPTY))) continue;
+            float w = 1.0 / float(d2);
+            dT += pairK(ocolor, m) * w * (getTemp(q) - temp);
+        }
+    }
+    return temp + dT * HEAT_GAIN / HEAT_KERNEL_SUM;
+}
+
+float carriedTemperature(ivec2 p, vec4 color, vec4 ocolor)
+{
+    ivec2 sFrom = sandSource(p);
+    if (sFrom != p && isCol(ocolor, YELLOW))
+        return getTemp(sFrom);
+    if (isLiquid(ocolor)) {
+        ivec2 lFrom = liquidSource(p, ocolor);
+        if (lFrom != p)
+            return getTemp(lFrom);
+    }
+    if (isCol(color, YELLOW) && isCol(ocolor, WATER))
+        return getTemp(sandTarget(p));
+    if (isCol(ocolor, EMPTY) && (isCol(color, YELLOW) || isLiquid(color)))
+        return AMBIENT_TEMP;
+
+    return getTemp(p);
+}
+
+void main()
+{
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+
+    if (p.x >= u_size.x || p.y >= u_size.y)
+        return;
+
+    vec4 color = imageLoad(inputState, p);
+    vec4 ocolor = color;
+    vec4 chosencolor = imageLoad(inputState,COLOR_STATE_POS);
+    if (isCol(imageLoad(inputState,p),vec4(0,0,0,0))&&p.y>bottom){
+        ocolor=EMPTY;
+    }
+    // default
+    if (isCol(imageLoad(inputState,COLOR_STATE_POS),vec4(0,0,0,0)) && p==COLOR_STATE_POS){
+        ocolor=YELLOW;
+    }
+
+    // draw ui
+    if (p.y<bottom && p!=COLOR_STATE_POS){
+        ocolor=vec4(0.1,0.1,0.1,1);
+    }
+
+
+    if ((distance(vec2(p), vec2(40, 30)) >= 20.0 && distance(vec2(p), vec2(40, 30)) <= 25.0) || (distance(vec2(p), vec2(40, 30)) <= 25.0 && abs((vec2(p).x - 40.0) - (vec2(p).y - 30.0)) < 4.0)) {
+        if(isCol(chosencolor, EMPTY)) {
+            ocolor = vec4(EMPTY.r + T, EMPTY.g+T, EMPTY.b+T,1);
+        }else{
+            ocolor = vec4(EMPTY.r - T, EMPTY.g-T, EMPTY.b-T,1);
+        }
+
+    }
+
+    if (distance(vec2(p), vec2(100,30))<25){
+        if (isCol(chosencolor,YELLOW)){
+            ocolor=YELLOW;
+        }else{
+            ocolor=vec4(YELLOW.r-T,YELLOW.g-T,YELLOW.b-T,1);
+        }
+    }
+
+
+    if (distance(vec2(p), vec2(160,30)) < 25){
+        if (isCol(chosencolor,WOOD)){
+            ocolor=WOOD;
+        }else{
+            ocolor=vec4(WOOD.r-T/4,WOOD.g-T/4,WOOD.b-T/4,1);
+        }
+    }
+
+    if (distance(vec2(p), vec2(220,30))<25){
+        if (isCol(chosencolor,WATER)){
+            ocolor=WATER;
+        }else{
+            ocolor=vec4(WATER.r-T,WATER.g-T,WATER.b-T,1);
+        }
+    }
+    if (distance(vec2(p), vec2(280,30))<25){
+        if (isCol(chosencolor,STEAM)){
+            ocolor=STEAM;
+        }else{
+            ocolor=vec4(STEAM.r-T,STEAM.g-T,STEAM.b-T,1);
+        }
+    }
+    if (distance(vec2(p), vec2(340,30))<25){
+        if (isCol(chosencolor,RED)){
+            ocolor=RED;
+        }else{
+            ocolor=vec4(RED.r-T,RED.g-T,RED.b-T,1);
+        }
+    }
+    if (distance(vec2(p), vec2(400,30))<25){
+        if (isCol(chosencolor,STEEL)){
+            ocolor=STEEL;
+        }else{
+            ocolor=vec4(STEEL.r-T,STEEL.g-T,STEEL.b-T,1);
+        }
+    }
+    if (distance(vec2(p), vec2(460,30))<25){
+        if (isCol(chosencolor,ACID)){
+            ocolor=ACID;
+        }else{
+            ocolor=vec4(ACID.r-T,ACID.g-T,ACID.b-T,1);
+        }
+    }
+    if (distance(vec2(p),vec2(520,30))<25){
+        if (isCol(chosencolor, GLASS)){
+            ocolor=GLASS;
+        }else{
+            ocolor=vec4(GLASS.r-T,GLASS.g-T,GLASS.b-T,1);
+        }
+    }
+    if (distance(vec2(p),vec2(580,30))<25){
+        if (isCol(chosencolor, ICE)){
+            ocolor=ICE;
+        }else{
+            ocolor=vec4(ICE.r-T,ICE.g-T,ICE.b-T,1);
+        }
+    }
+    // sand falling
+    if (isCol(color,YELLOW) && p.y > bottom){
+        float prefleft = rand(p);
+
+        if (isEmpty(p+down)){
+            ocolor=EMPTY;
+        }
+        else if (isEmpty(p+down+right) && (prefleft<0.5)){
+            ocolor=EMPTY;
+        }
+        else if (isEmpty(p+down+left) && (prefleft>=0.5)){
+            ocolor=EMPTY;
+        }
+    }
+    // sand filling
+    if (isEmpty(p) && p.y > bottom-1){
+
+        float prefleft = rand(p);
+
+        if (inBounds(p+up) && isCol(imageLoad(inputState,p+up),YELLOW)){
+            ocolor=YELLOW;
+        }
+        else if (inBounds(p+up+left) &&
+                 isCol(imageLoad(inputState,p+up+left),YELLOW) &&
+                 !isEmpty(p+left) && rand(p+up+left)<0.5){
+            ocolor=YELLOW;
+        }
+        else if (inBounds(p+up+right) &&
+                 isCol(imageLoad(inputState,p+up+right),YELLOW) &&
+                 !isEmpty(p+right) && rand(p+up+right)>=0.5){
+            ocolor=YELLOW;
+        }
+    }
+    //sand fallin through wateh
+    if (isCol(color, YELLOW) && p.y > bottom) {
+        ivec2 dest = sandTarget(p);
+        if (dest != p && sandSource(dest) == p) {
+            bool destIsWater = isCol(imageLoad(inputState, dest), WATER);
+            ocolor = destIsWater ? WATER : EMPTY;
+        }
+    }
+    if (p.y >= bottom && (isEmpty(p) || isCol(color, WATER))) {
+        if (sandSource(p) != p)
+            ocolor = YELLOW;
+    }
+
+    // liquid handling
+    if (isLiquid(color) && p.y > bottom) {
+        ivec2 dest = liquidTarget(p);
+        if (dest != p && liquidSource(dest, color) == p)
+            ocolor = EMPTY;
+    }
+    if (isEmpty(p) && p.y >= bottom) {
+        if (liquidSource(p, WATER) != p)
+            ocolor = WATER;
+        else if (liquidSource(p, ACID) != p)
+            ocolor = ACID;
+        else if (liquidSource(p, MGLASS) != p)
+            ocolor = MGLASS;
+    }
+
+    // steam handling ,the water steam not the steam app
+    if (isCol(color, STEAM) && p.y > bottom) {
+        float pref = rand(p);
+
+        if (pref < 0.2 && isEmpty(p + up)) {
+            ocolor = EMPTY;
+        }
+        else if (pref >= 0.2 && pref < 0.4 && isEmpty(p + up + left)) {
+            ocolor = EMPTY;
+        }
+        else if (pref >= 0.4 && pref < 0.6 && isEmpty(p + up + left + left)) {
+            ocolor = EMPTY;
+        }
+        else if (pref >= 0.6 && pref < 0.8 && isEmpty(p + up + right)) {
+            ocolor = EMPTY;
+        }
+        else if (pref >= 0.8 && isEmpty(p + up + right + right)) {
+            ocolor = EMPTY;
+        }
+    }
+    
+    if (isEmpty(p) && p.y > bottom - 1) {
+        float pref = rand(p);
+
+        if (pref < 0.2 && inBounds(p + down) && isCol(imageLoad(inputState, p + down), STEAM)) {
+            ocolor = STEAM;
+        }
+        else if (pref >= 0.2 && pref < 0.4 && inBounds(p + down + left) &&
+                 isCol(imageLoad(inputState, p + down + left), STEAM)) {
+            ocolor = STEAM;
+        }
+        else if (pref >= 0.4 && pref < 0.6 && inBounds(p + down + left + left) &&
+                 isCol(imageLoad(inputState, p + down + left + left), STEAM)) {
+            ocolor = STEAM;
+        }
+        else if (pref >= 0.6 && pref < 0.8 && inBounds(p + down + right) &&
+                 isCol(imageLoad(inputState, p + down + right), STEAM)) {
+            ocolor = STEAM;
+        }
+        else if (pref >= 0.8 && inBounds(p + down + right + right) &&
+                 isCol(imageLoad(inputState, p + down + right + right), STEAM)) {
+            ocolor = STEAM;
+        }
+    }
+
+
+    // fire rising
+
+    if (isCol(color,RED) && p.y < u_size.y && p.y > bottom){
+        float prefleft = rand(p);
+        float dis = rand(p+left+up+ivec2(floor(u_frame/30)*9,2));
+
+        if (dis >0.8){
+            ocolor=EMPTY;
+        }
+
+        if (isEmpty(p+up)){
+            ocolor=EMPTY;
+        }
+        else if (isEmpty(p+up+right) && (prefleft<0.5)){
+            ocolor=EMPTY;
+        }
+        else if (isEmpty(p+up+left) && (prefleft>=0.5)){
+            ocolor=EMPTY;
+        }
+    }
+
+
+
+    // fire filling
+    if (isEmpty(p) && p.y < u_size.y+1 && p.y > bottom){
+        float prefleft = rand(p);
+        float dis = rand(p+left+up+ivec2(floor(u_frame/30)*9,2));
+
+        if (inBounds(p+down) &&
+            isCol(imageLoad(inputState,p + down),RED) && dis >0.3){
+            ocolor=RED;
+            if (dis>0.8){
+                ocolor=EMPTY;
+            }
+        }
+        else if (inBounds(p+down+left) &&
+                 isCol(imageLoad(inputState,p + down + left),RED) &&
+                 rand(p + down + left)<0.5 && dis < 0.5){
+            ocolor=RED;
+            if (dis>0.8){
+                ocolor=EMPTY;
+            }
+        }
+        else if (inBounds(p+down+right) &&
+                 isCol(imageLoad(inputState,p + down + right),RED) &&
+                 rand(p + down + right)>=0.5 && dis >0.5){
+            ocolor=RED;
+            if (dis>0.8){
+                ocolor=EMPTY;
+            }
+        }
+    }
+
+    // wood catching fire
+    if (isCol(imageLoad(inputState,p),WOOD)){
+        float fires = rand(p+left+up+ivec2(floor(u_frame/30)*9,2));
+
+        if (fires>0.3){
+            if (inBounds(p+up) && isCol(imageLoad(inputState,p+up),RED)){
+                ocolor=RED;
+            }
+            if (inBounds(p+up+right) && isCol(imageLoad(inputState,p+up+right),RED)){
+                ocolor=RED;
+            }
+            if (inBounds(p+down) && isCol(imageLoad(inputState,p+down),RED)){
+                ocolor=RED;
+            }
+            if (inBounds(p+down+left) && isCol(imageLoad(inputState,p+down+left),RED)){
+                ocolor=RED;
+            }
+            if (inBounds(p+right) && isCol(imageLoad(inputState,p+right),RED)){
+                ocolor=RED;
+            }
+            if (inBounds(p+right+down) && isCol(imageLoad(inputState,p+right+down),RED)){
+                ocolor=RED;
+            }
+            if (inBounds(p+left) && isCol(imageLoad(inputState,p+left),RED)){
+                ocolor=RED;
+            }
+            if (inBounds(p+left+up) && isCol(imageLoad(inputState,p+left+up),RED)){
+                ocolor=RED;
+            }
+        }
+    }
+
+    // acid dissolving
+    if (p.y > bottom) {
+        ivec2 dirs[4] = ivec2[4](up, down, left, right);
+        float selfChance = acidChance(color);
+        bool selfIsAcid = isCol(color, ACID);
+        for (int i = 0; i < 4; i++) {
+            ivec2 q = p + dirs[i];
+            if (!inBounds(q)) continue;
+            vec4 qc = imageLoad(inputState, q);
+            if (selfChance > 0.0 && isCol(qc, ACID)) {
+                if (rand(p + q + ivec2(5, 11)) < selfChance)
+                    ocolor = EMPTY;
+            }
+            if (selfIsAcid && q.y > bottom) {
+                float c = acidChance(qc);
+                if (c > 0.0 &&
+                    rand(p + q + ivec2(5, 11)) < c &&
+                    rand(p + q + ivec2(29, 3)) < ACID_CONSUME_CHANCE)
+                    ocolor = EMPTY;
+            }
+        }
+    }
+
+    bool newlyPainted = false;
+    float heatPainted = 0.0;
+    // paint
+    if (u_painting == 1){
+        if (distance(vec2(p), vec2(u_mouse)) < 5.0 && p.y > bottom ) {
+            vec4 brushMaterial = imageLoad(inputState, COLOR_STATE_POS);
+            if (!isCol(brushMaterial, RED) || isCol(color, EMPTY)){
+                ocolor = brushMaterial;
+                newlyPainted = !isCol(color, brushMaterial);
+            } else {
+                heatPainted = FIRE_TEMP;
+            }
+        }
+        
+
+        if (p==COLOR_STATE_POS){
+            if (distance(u_mouse,vec2(40,30))<25){
+                ocolor=EMPTY;
+            }
+            if (distance(u_mouse,vec2(100,30))<25){
+                ocolor=YELLOW;
+            }
+            if (distance(u_mouse,vec2(160,30))<25){
+                ocolor=WOOD;
+            }
+            if (distance(u_mouse,vec2(220,30))<25){
+                ocolor=WATER;
+            }
+            if (distance(u_mouse,vec2(280,30))<25){
+                ocolor=STEAM;
+            }
+            if (distance(u_mouse,vec2(340,30))<25){
+                ocolor=RED;
+            }
+            if (distance(u_mouse,vec2(400,30))<25){
+                ocolor=STEEL;
+            }
+            if (distance(u_mouse,vec2(460,30))<25){
+                ocolor=ACID;
+            }
+            if (distance(u_mouse,vec2(520,30))<25){
+                ocolor=GLASS;
+            }
+            if (distance(u_mouse,vec2(580,30))<25){
+                ocolor=ICE;
+            }
+        }
+    }
+    float temp = carriedTemperature(p, color, ocolor);
+
+    if (p.y <= bottom) {
+        temp = AMBIENT_TEMP;
+    }
+    else {
+        temp = conductHeat(p, ocolor, temp);
+
+        float cool = COOLING_RATE;
+        if (isCol(ocolor, EMPTY))
+            cool = 0.02;
+        else if (isCol(ocolor, GLASS) || isCol(ocolor, MGLASS))
+            cool = GLASS_COOLING_RATE;
+        temp += (AMBIENT_TEMP - temp) * cool;
+
+        if (heatPainted>0) temp = heatPainted;
+
+        if (isCol(ocolor, WOOD) && temp > WOOD_IGNITION_TEMP) {
+            ocolor = RED;
+        }
+        if (isCol(ocolor, WATER) && temp >= STEAM_TEMP) {
+            ocolor = STEAM;
+            temp = STEAM_TEMP;
+        }
+
+        if ((isCol(ocolor, YELLOW) || isCol(ocolor, GLASS)) && temp > SAND_MELT_TEMP) {
+            ocolor = MGLASS;
+        }
+        else if (isCol(ocolor, MGLASS) && temp < GLASS_SOLIDIFY_TEMP) {
+            ocolor = GLASS;
+        }
+
+        if (isCol(ocolor, RED))
+            temp = FIRE_TEMP;
+        else if (isCol(ocolor, STEAM))
+            temp = max(temp, STEAM_TEMP);
+    }
+
+    if (newlyPainted) {
+        temp = AMBIENT_TEMP;
+        if (isCol(ocolor, RED))        temp = FIRE_TEMP;
+        else if (isCol(ocolor, STEAM)) temp = STEAM_TEMP;
+    }
+
+    imageStore(outputTemperature, p, vec4(temp, 0.0, 0.0, 1.0));
+    imageStore(outputState, p, ocolor);
+}
