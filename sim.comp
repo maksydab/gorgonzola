@@ -37,17 +37,20 @@ const vec4 GLASS = vec4(170.0/255.0, 170.0/255.0, 220.0/255.0, 1.0);
 const vec4 MGLASS = vec4(230.0/255.0, 170.0/255.0, 220.0/255.0, 1.0);
 const vec4 ACID = vec4(100.0/255.0, 255.0/255.0, 30.0/255.0, 1.0);
 const vec4 ICE = vec4(220.0/255.0, 220.0/255.0, 255.0/255.0, 1.0);
+const vec4 PLANT = vec4(10.0/255.0, 125.0/255.0, 10.0/255.0, 1.0);
 // we all love some warm
-const float AMBIENT_TEMP = 20.0;
+
+const float AMBIENT_TEMP = 120.0;
 const float FIRE_TEMP = 1800.0;
-const float WOOD_IGNITION_TEMP = 180.0;
+const float WOOD_IGNITION_TEMP = 280.0;
 const float HEAT_TRANSFER = 0.12;
 const float COOLING_RATE = 0.0;
 const float GLASS_COOLING_RATE = 0.003;
-const float STEAM_TEMP = 100.0;
-const float ICE_TEMP = 0.0;
-const float SAND_MELT_TEMP = 600.0;
-const float GLASS_SOLIDIFY_TEMP = 400.0;
+const float STEAM_TEMP = 200.0;
+const float ICE_TEMP = 20.0;
+const float ICE_FORM_TEMP = 100.0;
+const float SAND_MELT_TEMP = 700.0;
+const float GLASS_SOLIDIFY_TEMP = 500.0;
 const float ACID_CONSUME_CHANCE = 0.02;
 const int HEAT_RANGE = 3;
 const float HEAT_KERNEL_SUM = 9.5444;
@@ -70,7 +73,7 @@ bool inBounds(ivec2 p){
 
 float rand(ivec2 co) {
     vec2 seed = vec2(co) + vec2(mod(u_frame,1000) * 19, mod(u_frame,1000) * 31);
-    return fract(sin(dot(seed, vec2(12.9898, 78.233))) * 43758.5453);
+    return fract(sin(dot(seed, vec2(12.9898, 78.233))) * 43158.5453);
 }
 
 bool isCol(vec4 c, vec4 b)
@@ -95,6 +98,7 @@ float conductivity(vec4 m){
     if (isCol(m, STEEL))  return 1.00;
     if (isCol(m, RED))    return 0.90;
     if (isCol(m, WATER))  return 0.25;
+    if (isCol(m, ICE))  return 0.25;
     if (isCol(m, ACID))   return 0.20;
     if (isCol(m, MGLASS)) return 0.12;
     if (isCol(m, GLASS))  return 0.07;
@@ -345,6 +349,14 @@ void main()
             ocolor=vec4(ICE.r-T,ICE.g-T,ICE.b-T,1);
         }
     }
+    if (distance(vec2(p),vec2(640,30))<25){
+        if (isCol(chosencolor, PLANT)){
+            ocolor=PLANT;
+        }else{
+            ocolor=vec4(PLANT.r-T,PLANT.g-T,PLANT.b-T,1);
+        }
+    }
+
     // sand falling
     if (isCol(color,YELLOW) && p.y > bottom){
         float prefleft = rand(p);
@@ -505,8 +517,8 @@ void main()
         }
     }
 
-    // wood catching fire
-    if (isCol(imageLoad(inputState,p),WOOD)){
+    // wood/plant catching fire
+    if (isCol(imageLoad(inputState,p),WOOD)||isCol(imageLoad(inputState,p),PLANT)){
         float fires = rand(p+left+up+ivec2(floor(u_frame/30)*9,2));
 
         if (fires>0.3){
@@ -536,7 +548,36 @@ void main()
             }
         }
     }
+    if (isCol(imageLoad(inputState,p),WATER)){
+        float fires = rand(p+left+up+ivec2(floor(u_frame/30)*9,2));
 
+        if (fires>0.95){
+            if (inBounds(p+up) && isCol(imageLoad(inputState,p+up),PLANT)){
+                ocolor=PLANT;
+            }
+            if (inBounds(p+up+right) && isCol(imageLoad(inputState,p+up+right),PLANT)){
+                ocolor=PLANT;
+            }
+            if (inBounds(p+down) && isCol(imageLoad(inputState,p+down),PLANT)){
+                ocolor=PLANT;
+            }
+            if (inBounds(p+down+left) && isCol(imageLoad(inputState,p+down+left),PLANT)){
+                ocolor=PLANT;
+            }
+            if (inBounds(p+right) && isCol(imageLoad(inputState,p+right),PLANT)){
+                ocolor=PLANT;
+            }
+            if (inBounds(p+right+down) && isCol(imageLoad(inputState,p+right+down),PLANT)){
+                ocolor=PLANT;
+            }
+            if (inBounds(p+left) && isCol(imageLoad(inputState,p+left),PLANT)){
+                ocolor=PLANT;
+            }
+            if (inBounds(p+left+up) && isCol(imageLoad(inputState,p+left+up),PLANT)){
+                ocolor=PLANT;
+            }
+        }
+    }
     // acid dissolving
     if (p.y > bottom) {
         ivec2 dirs[4] = ivec2[4](up, down, left, right);
@@ -569,9 +610,13 @@ void main()
             if (!isCol(brushMaterial, RED) || isCol(color, EMPTY)){
                 ocolor = brushMaterial;
                 newlyPainted = !isCol(color, brushMaterial);
-            } else {
+            } 
+            if (isCol(brushMaterial, RED)){
                 heatPainted = FIRE_TEMP;
+            } else if (isCol(brushMaterial, ICE)){
+                heatPainted = ICE_TEMP;
             }
+            
         }
         
 
@@ -606,6 +651,9 @@ void main()
             if (distance(u_mouse,vec2(580,30))<25){
                 ocolor=ICE;
             }
+            if (distance(u_mouse,vec2(640,30))<25){
+                ocolor=PLANT;
+            }
         }
     }
     float temp = carriedTemperature(p, color, ocolor);
@@ -624,17 +672,25 @@ void main()
         temp += (AMBIENT_TEMP - temp) * cool;
 
         if (heatPainted>0) temp = heatPainted;
-
-        if (isCol(ocolor, WOOD) && temp > WOOD_IGNITION_TEMP) {
+        // wood and plants should burn on same temp right?
+        if ((isCol(ocolor,PLANT)||isCol(ocolor, WOOD)) && temp > WOOD_IGNITION_TEMP) {
             ocolor = RED;
         }
         if (isCol(ocolor, WATER) && temp >= STEAM_TEMP) {
             ocolor = STEAM;
             temp = STEAM_TEMP;
         }
-
+        if (isCol(ocolor, WATER) && temp <= ICE_FORM_TEMP) {
+            ocolor = ICE;
+            temp = ICE_FORM_TEMP-2;
+        }
+        if (isCol(ocolor, ICE) && temp >= ICE_FORM_TEMP) {
+            ocolor = WATER;
+            temp = ICE_FORM_TEMP+2;
+        }
         if ((isCol(ocolor, YELLOW) || isCol(ocolor, GLASS)) && temp > SAND_MELT_TEMP) {
             ocolor = MGLASS;
+
         }
         else if (isCol(ocolor, MGLASS) && temp < GLASS_SOLIDIFY_TEMP) {
             ocolor = GLASS;
@@ -646,11 +702,7 @@ void main()
             temp = max(temp, STEAM_TEMP);
     }
 
-    if (newlyPainted) {
-        temp = AMBIENT_TEMP;
-        if (isCol(ocolor, RED))        temp = FIRE_TEMP;
-        else if (isCol(ocolor, STEAM)) temp = STEAM_TEMP;
-    }
+
 
     imageStore(outputTemperature, p, vec4(temp, 0.0, 0.0, 1.0));
     imageStore(outputState, p, ocolor);

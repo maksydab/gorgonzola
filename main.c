@@ -1,4 +1,3 @@
-
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <stdio.h>
@@ -69,7 +68,7 @@ unsigned int make_compute_program(const char* src)
     if (!ok) {
         char log[2048];
         glGetProgramInfoLog(program, sizeof(log), NULL, log);
-        fprintf(stderr, "Compute program error:\n%s\n", log);
+        fprintf(stderr, "compute program error:\n%s\n", log);
     }
 
     glDeleteShader(shader);
@@ -100,7 +99,7 @@ unsigned int make_program(const char* vs_src, const char* fs_src)
     if (!ok) {
         char log[2048];
         glGetShaderInfoLog(fs, sizeof(log), NULL, log);
-        fprintf(stderr, "FRagment shader error:\n%s\n", log);
+        fprintf(stderr, "Fragment shader error:\n%s\n", log);
     }
 
     unsigned int p = glCreateProgram();
@@ -114,7 +113,7 @@ unsigned int make_program(const char* vs_src, const char* fs_src)
     if (!ok) {
         char log[2048];
         glGetProgramInfoLog(p, sizeof(log), NULL, log);
-        fprintf(stderr, "Ddisplay program error:\n%s\n", log);
+        fprintf(stderr, "Display program error:\n%s\n", log);
     }
 
     glDeleteShader(vs);
@@ -145,13 +144,15 @@ int main(void)
 
     if (!gladLoadGLLoader((GLADloadproc)glfwGetProcAddress)) {
         fprintf(stderr, "failed to initialize GLAD\n");
+        glfwDestroyWindow(w);
+        glfwTerminate();
         return 1;
     }
 
     glfwSetMouseButtonCallback(w, mouse_button);
     glfwSetCursorPosCallback(w, cursor);
 
-    printf("OpenGL: %s\n", glGetString(GL_VERSION));
+    printf("openGL: %s\n", glGetString(GL_VERSION));
 
     const char* vs =
         "#version 330 core\n"
@@ -163,47 +164,84 @@ int main(void)
         "gl_Position=vec4(p,0,1);"
         "}";
 
+
     const char* display =
         "#version 330 core\n"
         "out vec4 FragColor;"
         "uniform sampler2D u_state;"
         "uniform sampler2D u_temperature;"
+        "uniform int u_viewMode;"
         "void main(){"
-        "ivec2 p=ivec2(gl_FragCoord.xy);"
-        "vec4 s=texelFetch(u_state,p,0);"
-        "float temp=texelFetch(u_temperature,p,0).r;"
-        "float heat=clamp((temp-20.0)/500.0,0.0,1.0);"
-        "vec3 heatColor=mix("
-            "vec3(1.0,0.12,0.0),"
-            "vec3(1.0,0.95,0.75),"
-            "smoothstep(100.0,800.0,temp)"
-        ");"
-        "if(s.a<0.5 || s.r+s.g+s.b<0.02){"
-
-            "float emptyHeat=heat*0.12;"
-
-            "s.rgb=mix("
-                "vec3(0.0),"
-                "heatColor,"
-                "emptyHeat"
+            "ivec2 p=ivec2(gl_FragCoord.xy);"
+            "vec4 s=texelFetch(u_state,p,0);"
+            "float temp=texelFetch(u_temperature,p,0).r;"
+            "if(u_viewMode==1){"
+                "vec3 tempColor;"
+                "if(temp<100.0){"
+                    "float cold=1.0-smoothstep(0.0,100.0,temp);"
+                    "tempColor=mix("
+                        "vec3(0.015,0.025,0.07),"
+                        "vec3(0.10,0.42,1.0),"
+                        "cold"
+                    ");"
+                "}else{"
+                    "float heat=clamp((temp-100.0)/700.0,0.0,1.0);"
+                    "vec3 hotColor=mix("
+                        "vec3(1.0,0.12,0.0),"
+                        "vec3(1.0,0.95,0.75),"
+                        "smoothstep(100.0,800.0,temp)"
+                    ");"
+                    "tempColor=mix("
+                        "vec3(0.025,0.025,0.035),"
+                        "hotColor,"
+                        "heat"
+                    ");"
+                "}"
+                "FragColor=vec4(tempColor,1.0);"
+                "return;"
+            "}"
+            "if(u_viewMode==2){"
+                "FragColor=s;"
+                "return;"
+            "}"
+            "float heat=clamp((temp-100.0)/700.0,0.0,1.0);"
+            "vec3 heatColor=mix("
+                "vec3(1.0,0.12,0.0),"
+                "vec3(1.0,0.95,0.75),"
+                "smoothstep(100.0,800.0,temp)"
             ");"
-
-        "} else {"
-            "s.rgb=mix("
-                "s.rgb,"
-                "heatColor,"
-                "heat*0.8"
-            ");"
-
-        "}"
-
-        "FragColor=s;"
+            "float cold=1.0-smoothstep(0.0,100.0,temp);"
+            "vec3 coldColor=vec3(0.10,0.42,1.0);"
+            "if(s.a<0.5 || s.r+s.g+s.b<0.02){"
+                "float emptyHeat=heat*0.12;"
+                "s.rgb=mix("
+                    "vec3(0.0),"
+                    "heatColor,"
+                    "emptyHeat"
+                ");"
+                "s.rgb=mix(s.rgb,coldColor,cold*0.12);"
+            "}else{"
+                "s.rgb=mix("
+                    "s.rgb,"
+                    "heatColor,"
+                    "heat*0.8"
+                ");"
+                "s.rgb=mix("
+                    "s.rgb,"
+                    "coldColor,"
+                    "cold*0.65"
+                ");"
+            "}"
+            "FragColor=s;"
         "}";
+
 
     char* cs = read_file("sim.comp");
 
     if (!cs) {
-        fprintf(stderr, "Cannot read sim.comp\n");
+        fprintf(stderr, "cannot read sim.comp\n");
+        glfwDestroyWindow(w);
+        glfwTerminate();
         return 1;
     }
 
@@ -213,9 +251,7 @@ int main(void)
     unsigned int show = make_program(vs, display);
 
     unsigned int tex[2];
-
     unsigned int temperatureTex[2];
-
     unsigned int vao;
 
     glGenTextures(2, tex);
@@ -235,7 +271,6 @@ int main(void)
     }
 
     for (int i = 0; i < 2; i++) {
-
         glBindTexture(GL_TEXTURE_2D, tex[i]);
 
         glTexImage2D(
@@ -273,12 +308,12 @@ int main(void)
         fprintf(stderr, "failed to allocate temperature data\n");
         return 1;
     }
+
     for (int i = 0; i < WIDTH * HEIGHT; i++) {
         initialTemperature[i] = 20.0f;
     }
 
     for (int i = 0; i < 2; i++) {
-
         glBindTexture(GL_TEXTURE_2D, temperatureTex[i]);
 
         glTexImage2D(
@@ -330,6 +365,12 @@ int main(void)
     GLint temperatureLoc =
         glGetUniformLocation(show, "u_temperature");
 
+    GLint viewModeLoc =
+        glGetUniformLocation(show, "u_viewMode");
+
+    int viewMode = 0;
+    int sWasDown = 0;
+
     int current = 0;
     int frame = 0;
 
@@ -340,10 +381,26 @@ int main(void)
         if (glfwGetKey(w, GLFW_KEY_ESCAPE) == GLFW_PRESS)
             glfwSetWindowShouldClose(w, 1);
 
+        int sIsDown = (glfwGetKey(w, GLFW_KEY_S) == GLFW_PRESS);
+        if (sIsDown && !sWasDown) {
+            viewMode = (viewMode + 1) % 3;
+
+            if (viewMode == 0)
+                printf("view sim+temp\n");
+            else if (viewMode == 1)
+                printf("view temp onlu\n");
+            else
+                printf("view sim only\n");
+        }
+        sWasDown = sIsDown;
+
         int next = 1 - current;
 
         int width, height;
         glfwGetWindowSize(w, &width, &height);
+
+        if (width <= 0 || height <= 0)
+            continue;
 
         int x = (int)(mx * WIDTH / width);
         int y = HEIGHT - 1 - (int)(my * HEIGHT / height);
@@ -376,6 +433,7 @@ int main(void)
             (HEIGHT + 7) / 8,
             1
         );
+
         glMemoryBarrier(
             GL_SHADER_IMAGE_ACCESS_BARRIER_BIT |
             GL_TEXTURE_FETCH_BARRIER_BIT
@@ -390,12 +448,15 @@ int main(void)
         glActiveTexture(GL_TEXTURE0);
         glBindTexture(GL_TEXTURE_2D, tex[current]);
         glUniform1i(stateLoc, 0);
+
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(
             GL_TEXTURE_2D,
             temperatureTex[current]
         );
         glUniform1i(temperatureLoc, 1);
+
+        glUniform1i(viewModeLoc, viewMode);
 
         glDrawArrays(GL_TRIANGLES, 0, 3);
 
